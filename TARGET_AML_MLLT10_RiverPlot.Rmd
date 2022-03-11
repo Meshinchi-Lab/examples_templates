@@ -1,0 +1,187 @@
+---
+title: "MLLT10 River Plot"
+author: "Jenny Smith"
+date: "12/4/19"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2019.05.14_MLLT10_Expression_Profile/"))
+
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+library(ggalluvial)
+library(ggfittext)
+getwd()
+```
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_2.12.20"))
+```
+
+
+#River Plot
+
+```{r}
+forPlot <- read.csv("MLLT10_fusion_for_river_plot.csv",check.names = FALSE)
+colnames(forPlot) <- c("Type","N","Percent")
+```
+
+
+```{r}
+forPlot <- forPlot %>% 
+  mutate(MLLT10="MLLT10 Rearranged",
+         Percent=round(Percent,digits=2), 
+         Karyotype=ifelse(grepl("Conflict|RNA Seq Only",Type),
+                          "No","Yes")) %>%
+  mutate_at(vars(Type), ~case_when(
+    grepl("Both", .) ~ "Both Confirm",
+    grepl("Conflict",.) ~ "Gene Partner Misidentified", 
+    grepl("RNA Seq Only",.) ~ "RNA-Seq Only", 
+    TRUE ~ Type))
+
+forPlot
+```
+
+
+```{r fig.height=6.5, fig.width=10}
+alluvial <- ggplot(data=forPlot, 
+                         aes(axis1=MLLT10,
+                             axis2=Karyotype, 
+                             axis3=Type,
+                             y=Percent)) + 
+                    geom_alluvium(aes(fill=Type), 
+                                  width = 1/2, reverse=T) +  
+                    geom_stratum(alpha=c(1,rep(0.1,6)),
+                                 size=1.25,
+                                 width = 1/2,
+                                 reverse=T,
+                                 fill=c("dodgerblue",rep("black",6))) + 
+                    geom_fit_text(stat="stratum",
+                                  color=c("white"), #rep("black",6)
+                                  fontface="bold",
+                                  outside=FALSE,
+                                  padding.y=unit(3,"mm"),
+                                  padding.x=unit(0.75,"mm"),
+                                  grow=FALSE,
+                                  reflow=TRUE,
+                                  width = 1/2,
+                                  min.size=16,
+                                  size=30,
+                                  label.strata=TRUE,
+                                  reverse=T) +
+                    scale_y_continuous(breaks = seq(0,100,by=10),
+                                       limits = c(0,100)) +
+                    scale_x_continuous(labels=c("MLLT10\nRearranged",
+                                              "Karyotype\nDetection",
+                                              "RNA-seq\nFusion\nDetection"),
+                                       expand = c(0.01,0.01),
+                                       breaks = c(1:3), 
+                                       limits=c(0.75,3.25)) +
+                    labs(y="Percent") +
+                    theme_classic() +
+                    theme(axis.text.y = element_text(size=18, color="black"),
+                          axis.text.x = element_text(size=20,color="black"),
+                          axis.title = element_text(size=20),
+                          legend.text = element_text(size=16),
+                          legend.position = "top",
+                          legend.title = element_blank()) +
+                    scale_fill_manual(values =  c("Gene Partner Misidentified"="firebrick2",
+                                                  "Both Confirm"="dodgerblue2",
+                                                  "RNA-Seq Only"="dodgerblue4",
+                                                  "Karyotype Only"="darkgoldenrod2")) 
+
+# Cairo("MLLT10_DetectionMethod_AlluvialPlot.pdf",type="pdf",width = 14, height = 10, 
+#       units = "in", dpi=300) #width = 14, height = 10, units = "in", res=300
+# pdf("MLLT10_DetectionMethod_AlluvialPlot.pdf",height = 6.5, width = 10)
+ # png("MLLT10_DetectionMethod_AlluvialPlot.png",height = 6.5, width = 10, res=1200, units="in")
+alluvial
+# dev.off()
+
+```
+
+
+
+```{r}
+alluvial.flip <- ggplot(data=forPlot, 
+                         aes(axis3=MLLT10,
+                             axis2=Karyotype, 
+                             axis1=Type,
+                             y=Percent)) + 
+                    geom_alluvium(aes(fill=Type), 
+                                  width = 1/2, reverse=FALSE) +  
+                    geom_stratum(alpha=c(rep(0.1,6),1),
+                                 size=1.25,
+                                 width = 1/2,
+                                 reverse=FALSE,
+                                 fill=c("dodgerblue",rep("black",6))) + 
+                    geom_fit_text(stat="stratum",
+                                  color=c("white"), #rep("black",6)
+                                  fontface="bold",
+                                  outside=FALSE,
+                                  padding.y=unit(3,"mm"),
+                                  padding.x=unit(0.5,"mm"),
+                                  grow=FALSE,
+                                  reflow=TRUE,
+                                  width = 1/2,
+                                  min.size=16,
+                                  size=40,
+                                  label.strata=TRUE,
+                                  reverse=FALSE) +
+                    scale_y_continuous(breaks = seq(0,100,by=10),
+                                       limits = c(0,100)) +
+                    scale_x_continuous(labels=c("MLLT10\nRearranged",
+                                              "Karyotype\nDetection",
+                                              "RNA-seq\nFusion\nDetection"),
+                                       expand = c(0.01,0.01),
+                                       breaks = c(1:3), 
+                                       limits=c(0.75,3.25)) +
+                    # scale_x_discrete(limits=c("MLLT10","Karyotype","Type"),
+                    #                  labels=c("MLLT10\nRearranged",
+                    #                           "Karyotype\nDetection", 
+                    #                           "RNA-seq\nFusion\nDetection"),
+                    #                  expand = c(0.01,0.01), 
+                    #                  width=0.5) +
+                    labs(y="Percent") +
+                    theme_classic() +
+                    theme(axis.text.y = element_text(size=18, color="black"),
+                          axis.text.x = element_text(size=20,color="black"),
+                          axis.title = element_text(size=20),
+                          legend.text = element_text(size=18),
+                          legend.position = "top",
+                          legend.title = element_blank()) +
+                    scale_fill_manual(values =  c("Gene Partner Misidentified"="firebrick2",
+                                                  "Both Confirm"="dodgerblue2",
+                                                  "RNA-Seq Only"="dodgerblue4",
+                                                  "Karyotype Only"="darkgoldenrod2")) +
+  coord_flip()
+
+```
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

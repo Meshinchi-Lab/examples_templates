@@ -1,0 +1,78 @@
+---
+title: "GDCRNATools Example"
+author: "Jenny Smith"
+date: "September 26, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(DT)
+library(GDCRNATools)
+data(rnaCounts)
+data(mirCounts)
+```
+
+```{r}
+head(mirCounts[,1:5])
+dim(mirCounts)
+```
+
+```{r}
+head(rnaCounts[,1:5])
+dim(rnaCounts)
+```
+
+```{r}
+####### Normalization of RNAseq data #######
+rnaExpr <- gdcVoomNormalization(counts = rnaCounts, filter = FALSE)
+head(rnaExpr[,1:5])
+####### Normalization of miRNAs data #######
+mirExpr <- gdcVoomNormalization(counts = mirCounts, filter = FALSE)
+head(mirExpr[,1:5])
+```
+
+```{r}
+####### Parse and filter RNAseq metadata #######
+metaMatrix.RNA <- gdcParseMetadata(project.id = 'TCGA-CHOL',
+                                   data.type  = 'RNAseq', 
+                                   write.meta = FALSE)
+
+metaMatrix.RNA <- gdcFilterDuplicate(metaMatrix.RNA)
+metaMatrix.RNA <- gdcFilterSampleType(metaMatrix.RNA)
+
+dim(metaMatrix.RNA)
+table(metaMatrix.RNA$sample_type)
+```
+
+```{r}
+DEGAll <- gdcDEAnalysis(counts     = rnaCounts, 
+                        group      = metaMatrix.RNA$sample_type, 
+                        comparison = 'PrimaryTumor-SolidTissueNormal', 
+                        method     = 'limma')
+
+```
+
+```{r}
+### All DEGs
+deALL <- gdcDEReport(deg = DEGAll, gene.type = 'all')
+
+### DE long-noncoding
+deLNC <- gdcDEReport(deg = DEGAll, gene.type = 'long_non_coding')
+head(deLNC)
+### DE protein coding genes
+dePC <- gdcDEReport(deg = DEGAll, gene.type = 'protein_coding')
+head(dePC)
+```
+
+```{r}
+ceOutput.test <- gdcCEAnalysis(lnc         = rownames(deLNC), 
+                          pc          = rownames(dePC), 
+                          lnc.targets = 'starBase', 
+                          pc.targets  = 'starBase', 
+                          rna.expr    = rnaExpr, 
+                          mir.expr    = mirExpr)
+```

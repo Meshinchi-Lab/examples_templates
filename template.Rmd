@@ -1,0 +1,226 @@
+---
+title: ""
+author: "Jenny Smith"
+date: ""
+output: html_document
+---
+
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,""))
+```
+
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+# library(keyring) #cannot install non-zero exit 
+
+getwd()
+```
+
+
+# Raw Counts
+
+```{r}
+genome <- "GRCh38" #"GRCh37"
+```
+
+
+## GRCh37 
+
+```{r}
+if(genome=="GRCh37"){
+  grch37_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69"),
+                      full.names=TRUE)
+  # grch37_files
+  
+  ##Counts 
+  grch37_cts_file <- grep("dupGenesRemoved_FractionalCounts", grch37_files,value=T)
+  cts_grch37 <- readRDS(file.path(grch37_cts_file))
+
+  gene_ids <- cts_grch37[,c(1:2)]
+  cts_grch37 <- as.data.frame(cts_grch37)
+  rownames(cts_grch37) <- cts_grch37$geneSymbol
+  cts_grch37 <- cts_grch37[,-c(1:2)]
+
+  
+  ##TPM
+  grch37_TPM_file <- grep("dupGenesRemoved_TPM", grch37_files, value = T)
+  TPM_grch37 <- readRDS(file.path(grch37_TPM_file))
+
+  gene_ids <- TPM_grch37[,c(1:2)]
+  TPM_grch37 <- as.data.frame(TPM_grch37)
+  rownames(TPM_grch37) <- TPM_grch37$geneSymbol
+  TPM_grch37 <- TPM_grch37[,-c(1:2)]
+
+  
+  ## 0531 TPM 
+  # polyA_files <-  dir(grch37_files[grep("PolyA", grch37_files)], full.names = TRUE)
+  # TPM_0531_grch37 <- read.csv(file.path(grep("AAML0531_dupGenesRemoved_TPM", polyA_files, value=T)))
+}
+```
+
+
+## GRCh38 
+
+
+```{r}
+current_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/"))
+# current_files
+    
+
+if(genome=="GRCh38"){
+    grch38_cts_file <- grep("_RBD_.+scaledTPM_counts.RDS", current_files, value=TRUE)
+    cts_grch38 <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/",grch38_cts_file))
+    cts_grch38_ids <- cts_grch38[,grep("gene_id|gene_name", colnames(cts_grch38))]
+    
+    cts_grch38 <- as.data.frame(cts_grch38)
+    rownames(cts_grch38) <-  cts_grch38_ids$gene_name
+    cts_grch38 <- cts_grch38[,-grep("gene_id|gene_name", colnames(cts_grch38))]
+    
+    # head(cts_grch38[,1:5])
+    dim(cts_grch38) #58263  3021 
+    
+    ### TPM
+    grch38_TPM_file <- grep("_RBD_.+Abundance_TPM", current_files, value=TRUE)
+    TPM_grch38 <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/",grch38_TPM_file))
+    TPM_grch38_ids <- TPM_grch38[,grep("gene_id|gene_name", colnames(TPM_grch38))]
+    
+    TPM_grch38 <- as.data.frame(TPM_grch38)
+    rownames(TPM_grch38) <-  TPM_grch38_ids$gene_id
+    TPM_grch38 <- TPM_grch38[,-grep("gene_id|gene_name", colnames(TPM_grch38))]
+    
+    
+    # head(TPM_grch38)
+    dim(TPM_grch38) #58263  3021
+}
+```
+
+
+# ClinData
+
+* I need a dynamic title for each project / subproject
+* I need to use the YAML date object to create a single CDE to be used for the entirety of the project 
+* how can I easily update the project CDEs? 
+
+Okay - One idea would be to instead call a function which will create an eSet/multiassay object. This will then had pData slot that is updated each time a new project is started and ideally there are slots on the eSet to include preprocessing information. 
+
+Also, I would want to load the expression data as its own R package! DataPackageR. 
+
+```{r message=FALSE}
+#https://cran.r-project.org/web/packages/REDCapR/vignettes/workflow-read.html 
+project <- ""
+
+if(project==""){
+  stop("Must include Projecy name!")
+}else{
+  message(paste0("Project is: ",project))
+  current_cde_database <- paste("TARGET_AML_CDEs_For_Project",project, ".RDS", sep="_")
+  
+  if(file.exists(current_cde_database)){
+    print("Reading CDEs from Rdata object.")
+    merged <- readRDS(current_cde_database)
+      
+  }else{
+    print("Downloading CDEs from RedCap API.")
+    path_credential <- file.path(HOME,".redcap")
+    project_id <- 1295
+  
+    credential  <- REDCapR::retrieve_credential_local(
+      path_credential = path_credential,
+      project_id = project_id)
+    
+    #takes about 30 sec to download. 
+    merged <- redcap_read(redcap_uri = credential$redcap_uri, 
+                          token = credential$token, 
+                          raw_or_label_headers = 'label')
+    if(merged$success){
+      merged <- data.frame(merged$data, check.names=TRUE) #remove the white spaces  (will this even work??)
+      saveRDS(merged, current_cde_database)
+    }
+    
+    fname_c <- ifelse(length(ls(pattern = "_cts_file")) == 0,"None" ,basename(get(ls(pattern = "_cts_file"))))
+    fname_t <- ifelse(length(basename(ls(pattern = "_TPM_file"))) == 0,"None", basename(get(ls(pattern = "_TPM_file"))))
+    
+    #Create a simple log file from the day the project starts
+    cat(c(paste("Date:", Sys.Date()),
+          paste("cts:", fname_c),
+          paste("tpm:", fname_t), 
+          paste("CDE:", current_cde_database)),
+          sep = "\n", 
+          file = paste(project, Sys.Date(), ".log", sep="_"))
+    
+  }
+  
+  #keep a list of the ineligable patiens to remove if necessary
+  inelig <- merged %>% 
+    filter(Eligibility.Comments == "remove") %>% 
+    pull(USI)
+  
+  #Filter those with USIs and are eligible for the study
+  merged <- merged %>% 
+    filter(Eligibility.Comments != "remove")
+  
+  
+  dim(merged) 
+  head(merged)
+
+}
+```
+
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+```
+
+
+#Unsupervised Clustering
+
+
+
+#Perform Differential Expression
+
+
+
+#QC Plots 
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

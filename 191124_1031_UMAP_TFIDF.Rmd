@@ -1,0 +1,217 @@
+---
+title: "AAML1031_UMAP_TFIDF"
+author: "Scott Furlan"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r, echo=FALSE, warning=F, message=F}
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=30, fig.height=14,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+graphics.off()
+#.rs.restartR()
+identifier<-"1031"
+
+BOX<-TRUE
+str<-strsplit(Sys.info()[4], "\\.")[[1]]
+if(any(str %in% "washington")){loc="UW"} else {loc="SCRI"}
+if(any(str %in% "ewrlnxre60")){loc="SCRI"} else {loc="local"}
+if(any(str %in% "ip-172-31-17-144")){loc = "AWS_Analysis"} else {loc="local"}
+if(any(str %in% c("MacDude", "MLRGSRJ03", "MLRGSRK68", "MLRGSM129"))){loc = "local"} else {loc="UNK"}
+
+switch(loc, UW={ROOT_DIR="~"}, 
+      SCRI={ROOT_DIR="~/mnt/furlan_s_active"}, 
+      AWS_Analysis={ROOT_DIR="/home/rstudio"})
+if(loc=="local" & file.exists("~/mnt/furlan_s_active/.mounted")){ROOT_DIR="~/mnt/furlan_s_active"}
+if(BOX){ROOT_DIR="/Users/sfurla/Box Sync/PI_FurlanS/computation"}
+stem<-"AML/1031"
+
+DATA_DIR <- file.path(ROOT_DIR, "Analysis", stem,  "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR, "Analysis", stem,"res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR, "Analysis", stem, "rmd")     # SPECIFY HERE
+TMP_DIR  <- file.path(ROOT_DIR, "Analysis", stem, "tmp") 
+ENR_DIR<-file.path(ROOT_DIR, "Bioinformatics Resources", "Enrichment")
+SCRIPT_DIR<-file.path(ROOT_DIR, "develop", "SFScripts")
+source(file.path(SCRIPT_DIR, "plotting.R"))
+source(file.path(SCRIPT_DIR,'fftRtsne.R'))
+source(file.path(SCRIPT_DIR, "functionList.R"))
+suppressPackageStartupMessages({
+library(DESeq2)
+library(seqGlue)
+library(apeglm)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(pheatmap)
+library(knitr)
+library(tidyverse)
+library(data.table)
+library(tools)
+library(RColorBrewer)
+library(randomcoloR)
+})
+col2hex <- function(col, alpha) rgb(t(col2rgb(col)), alpha=alpha, maxColorValue=255)
+
+
+cl<-readRDS(file.path(SCRIPT_DIR, "colorData400.RDS"))
+source(file.path(SCRIPT_DIR,'color.R'))
+
+SFtheme<-theme_bw() +
+    theme(legend.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          legend.key = element_rect(fill = "transparent",colour = NA),
+    axis.text.x=element_text(angle=90, hjust=0.95,vjust=0.2))
+
+theme_set(SFtheme)
+
+```
+
+
+# Plot Gene Dispersion
+
+```{r, fig.height=4, fig.width=5}
+data<-as.matrix(fread(file.path(DATA_DIR, "TARGET_AAML1031_DiagnosticSamples_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")), rownames=1)
+meta1<-data.frame(USI=sapply(strsplit(colnames(data), "\\."), "[[", 3), batch=as.numeric(factor(sapply(strsplit(colnames(data), "\\."), "[[", 4))), replicate = as.logical(as.numeric(factor(sapply(strsplit(colnames(data), "\\."), "[[", 5)))-1))
+
+
+meta<-fread(file.path(DATA_DIR, "TARGET_AAML1031_ClinicalData2.csv"))
+fixed_meta<-meta[match(meta1$USI, meta$USI),]
+colnames(fixed_meta)<-c('USI', 'Study', 'Age', 'WBC', 'Marrow_Blasts', 'Peripheral_Blasts', 'WHO_Classification', 'Primary_Fusion', 'Add_Fusions', 'NPM', 'CEBPA', 'WT1', 'FLT3_ITD', 'FLT3_ITD_ratio')
+fixed_meta$batch<-as.numeric(factor(sapply(strsplit(colnames(data), "\\."), "[[", 4)))
+data_in<- as.matrix(data[Matrix::rowSums(data) >10, ])
+tk<-names(table(fixed_meta$Primary_Fusion))[table(fixed_meta$Primary_Fusion)>3]
+fixed_meta$WHO_Classification<-gsub("not otherwise categorized", "NOS", fixed_meta$WHO_Classification)
+
+cls <-readRDS(file.path(RES_DIR, "PFusionCols.RDS"))
+wcls <-readRDS(file.path(RES_DIR, "WHOCols.RDS"))
+names(wcls)<-gsub("not otherwise categorized", "NOS", names(wcls))
+c<-rev(pals::polychrome())
+names(c)<-tk
+c<-c[!is.na(names(c))]
+cls[names(cls) %in% tk]<-c
+cls[names(cls)=="None"]<-"lightgrey"
+cls<-c(cls,"Other (Rare)"="darkgrey")
+obj<-calc_dispersion(data_in)
+ntop<-14000
+obj <-select_genes(obj, top_n = ntop)
+
+sg<-get_selected_genes(obj)
+plot_gene_dispersion(obj)+SFtheme+ggtitle(paste0("Using ", ntop, " features"))
+```
+
+
+# UMAP TFIDF TRANSFORMED (All fusions colored)
+```{r}
+
+data<-t(t(data_in)/estimateSizeFactorsForMatrix(data_in))
+tf<-tf_idf_transform(data)
+  
+
+vdata<-as.matrix(tf[rownames(tf) %in% sg,])
+
+UMAP<-uwot::umap(X = t(vdata), metric = "cosine", min_dist = 0.1, n_neighbors = 15L, fast_sgd = FALSE, nn_method = "annoy", verbose=T)
+toplot<-data.frame(x=UMAP[,1],y=UMAP[,2])
+toplot<-as.data.frame(cbind(toplot, fixed_meta))
+
+# tsne<-fftRtsne(X=t(vdata), pca_scale = FALSE, max_iter = 1000,  nthreads=detectCores())
+# 
+# toplot<-data.frame(x=tsne[,1],y=tsne[,2])
+# toplot<-as.data.frame(cbind(toplot, fixed_meta))
+
+
+ggplot(toplot, aes(x=x,y=y,col=Primary_Fusion))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2")+scale_color_manual(values=cls) -> g1
+m3addon::red_dim_plot(g1)
+```
+
+
+# UMAP TFIDF TRANSFORMED (WHO Classification)
+```{r}
+
+ggplot(toplot, aes(x=x,y=y,col=WHO_Classification))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2")+scale_color_manual(values=wcls) -> g1
+m3addon::red_dim_plot(g1)
+```
+
+
+
+# UMAP TFIDF TRANSFORMED (major fusions colored)
+```{r}
+tk<-names(table(fixed_meta$Primary_Fusion))[table(fixed_meta$Primary_Fusion)>3]
+fixed_meta$Primary_Fusion_major<-fixed_meta$Primary_Fusion
+fixed_meta$Primary_Fusion_major[!fixed_meta$Primary_Fusion_major %in% tk]<-"Other (Rare)"
+toplot<-data.frame(x=UMAP[,1],y=UMAP[,2])
+toplot<-as.data.frame(cbind(toplot, fixed_meta))
+
+
+ggplot(toplot, aes(x=x
+                      ,y=y,col=Primary_Fusion_major))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2")+scale_color_manual(values=cls) -> g1
+m3addon::red_dim_plot(g1)
+```
+
+
+
+# UMAP TFIDF TRANSFORMED (other)
+```{r}
+ggplot(toplot, aes(x=x
+                      ,y=y,col=CEBPA))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2") -> g1
+m3addon::red_dim_plot(g1)
+
+ggplot(toplot, aes(x=x
+                      ,y=y,col=WT1))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2") -> g1
+m3addon::red_dim_plot(g1)
+ggplot(toplot, aes(x=x
+                      ,y=y,col=NPM))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2") -> g1
+m3addon::red_dim_plot(g1)
+
+ggplot(toplot, aes(x=x
+                      ,y=y,col=FLT3_ITD))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2")-> g1
+m3addon::red_dim_plot(g1)
+
+ggplot(toplot, aes(x=x
+                      ,y=y,col=log(FLT3_ITD_ratio)))+
+  geom_point( size=4)+scale_colour_viridis_c()+
+  xlab("UMAP_1") + ylab("UMAP_2")-> g1
+m3addon::red_dim_plot(g1)
+
+```
+
+```{r, eval=F, include=F}
+gene<-"H2AFY2"
+df<-data.frame(counts=data[rownames(data) %in% gene,], fusion=fixed_meta$Primary_Fusion_major)
+ggplot(df, aes(x=fusion, y=counts, fill=fusion))+
+  geom_boxplot()+scale_fill_manual(values=cls)+ggtitle(gene)
+
+rownames(vdata)[grep("^H2AF", rownames(vdata))]
+
+```
+
+## Appendix
+
+```{r Appendix,echo=FALSE}
+sessionInfo()
+getwd()
+```
+

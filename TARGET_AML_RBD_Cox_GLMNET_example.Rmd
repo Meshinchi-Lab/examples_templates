@@ -1,0 +1,195 @@
+---
+author: "Jenny Smith"
+title: "cox glmnet workflow example"
+output: html_document
+---
+
+#Input Results to Lasso Feature Selection
+
+```{r message=FASLE}
+library(glmnet)
+```
+
+```{r}
+sparsemat_to_df <- function(coef){
+    #sparsemat is a sparce matrix from the output of predict(.,type="coefficients")
+    coef <- data.frame(coef=coef[,1]) %>%
+        rownames_to_column("gene") %>%
+        filter_all(all_vars(. != 0))
+    return(coef)
+  }
+```
+
+```{r}
+#grid of lambda values to test.
+grid <- 10^ seq(10,-2, length=100)
+```
+
+## Training
+
+```{r}
+x.train <- CDE.train %>%
+  filter(EFS.time..days. != 0) %>% # time cannot be zero
+  select(targets) %>%  #pull(sig.ures,Variable)
+  as.matrix()
+
+y.train <- CDE.train %>%
+            filter(EFS.time..days. != 0) %>% # time cannot be zero
+            select(time="EFS.time..days.", status="Event.ID") %>%
+            as.matrix()
+
+ dim(y.train)
+ dim(x.train)
+```
+
+```{r}
+mod <- glmnet(x=x.train,
+              y=y.train,
+              family = "cox",
+              standardize = FALSE,
+              lambda = grid)
+
+plot(mod)
+```
+
+```{r}
+#Seed was set at 2019 above!!
+# set.seed(2019)
+cv.lambda <- cv.glmnet(x=x.train, y=y.train,
+                         family = "cox",
+                         standardize = FALSE,
+                         lambda = grid,
+                         nfolds = nrow(x.train),
+                         type.measure = "deviance")
+lambda.min <- cv.lambda$lambda.min #0.07054802
+plot(cv.lambda)
+```
+
+```{r}
+coef.trainingMod <- predict(mod, type="coefficients", s=lambda.min)
+nonZero.train <- sparsemat_to_df(coef.trainingMod) %>%
+  arrange(desc(coef)) %>%
+  left_join(., lncRNAs, by=c("gene"="gene_id")) %>%
+  left_join(., select(sig.mres, Variable, Hazard.Ratio, P.Value), by=c("gene"="Variable"))
+
+nonZero.train #28 genes
+```
+
+```{r}
+table(sig.ures$Variable %in% nonZero.train$gene)
+```
+
+
+## Testing
+
+https://www.biostars.org/p/317701/
+
+
+```{r}
+x.test <- CDE.test %>%
+  filter(EFS.time..days. != 0) %>% # time cannot be zero
+  select(starts_with("ENSG")) %>%
+  as.matrix()
+
+# y.test <- CDE.test %>%
+#   filter(EFS.time..days. != 0) %>% # time cannot be zero
+#   select(time="EFS.time..days.", status="Event.ID") %>%
+#   as.matrix()
+
+ # dim(y.test)
+ dim(x.test)
+```
+
+```{r}
+#predict the surival outcome. Returns relative risk of each patient
+pred.outcome <- predict(mod,
+                        newx = x.test,
+                        type="response",
+                        s=lambda.min)  
+range(pred.outcome) #like hazard ratios?
+head(pred.outcome)
+dim(pred.outcome)
+```
+
+
+##Apply the Score
+
+```{r}
+#update the test set based on the trained model.
+Model.Comparison.df <- assignment %>%
+    left_join(.,CPM.lnc[nonZero.train$gene,] %>%
+              t() %>%
+              as.data.frame() %>%
+              rownames_to_column("USI"),
+            by="USI")  %>%
+
+    #apply the score calculation
+    mutate(lnc.Score=apply(dplyr::select(., starts_with("ENSG")), 1,
+           function(x) sum(x*nonZero.train$coef))) %>%
+
+    group_by(Set) %>%
+    mutate(lnc.Median.Groups=factor(ifelse(lnc.Score >= median(lnc.Score), "high", "low"),
+                                    levels=c("low", "high"))) %>%
+    ungroup() %>%
+
+    arrange(lnc.Score)
+```
+
+```{r}
+range(Model.Comparison.df$lnc.Score)
+hist(Model.Comparison.df$lnc.Score, breaks=seq(-3,2,by=0.25)) #breaks=seq(-2,1,by=0.1)
+table(Model.Comparison.df$Set, Model.Comparison.df$lnc.Median.Groups)
+```
+
+```{r}
+#Use OS and EFS for test error metrics
+y1 <- c("EFS.time..days.","Event.ID")
+y2 <- c("OS.time..days.","OS.ID")
+
+make_form <- function(response,covariate){ as.formula(paste0("Surv(", response[1],"/365.25", ",",response[2], ")~ ",covariate))}
+```
+
+```{r}
+#Examine how the model score delineates risk groups.
+error.metrics <- Model.Comparison.df %>%
+    group_by(Set) %>%
+    do(cox.OSmedianGroups=coxph(make_form(y1, "lnc.Median.Groups"), data = .),
+       cox.EFSmedianGroups=coxph(make_form(y2, "lnc.Median.Groups"), data = .),
+
+       cox.OScontinuous=coxph(make_form(y1, "lnc.Score"), data = .),
+       cox.EFScontinuous=coxph(make_form(y2, "lnc.Score"), data = .),
+
+       KM.OS=SurvivalPlot(survfit(make_form(y1, "lnc.Median.Groups"), data=.), #survival plots
+                         LegendTitle = "OS",
+                         timeUnit = "Years",
+                         colors = c("high"="red", "low"="dodgerblue")),
+       KM.EFS=SurvivalPlot(survfit(make_form(y2, "lnc.Median.Groups"), data=.),
+                          LegendTitle="EFS",
+                          timeUnit= "Years",
+                          colors= c("high"="red", "low"="dodgerblue"))) %>%
+  ungroup() %>%
+
+  mutate(Set=factor(Set, levels=c("Train","Test"))) %>%
+  arrange(Set)
+```
+
+```{r}
+error.metrics
+```
+
+```{r}
+lapply(error.metrics$cox.OScontinuous, summary)
+```
+
+```{r}
+lapply(error.metrics$cox.EFScontinuous, summary)
+```
+
+```{r}
+lapply(error.metrics$cox.EFSmedianGroups, summary)
+```
+
+```{r fig.height=4, fig.width=5}
+error.metrics$KM.OS
+error.metrics$KM.EFS
+```

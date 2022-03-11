@@ -1,0 +1,132 @@
+---
+title: "DGI db Tutorial"
+author: "Jenny Smith"
+date: "September 10, 2019"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir =
+                       file.path(PROJHOME,"2018.08.29_CBL_Exon8-9_Deletions/AAML1031/"))
+options(stringsAsFactors = FALSE)
+
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+getwd()
+```
+
+
+#Gene list
+
+```{r}
+ADCs <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/Full_ADC_Target_Database_rmDuplicates_08.28.2019.csv"), row.names = 1)
+
+# head(ADCs)
+```
+
+
+#rDGIdb 
+https://bioconductor.org/packages/release/bioc/html/rDGIdb.html
+
+
+```{r}
+# BiocManager::install("rDGIdb")
+library(rDGIdb)
+```
+
+```{r}
+genes <- ADCs$Gene.symbol.of.ADC.target..Cleaned.
+```
+
+With a vector of genes, we can query DGIdb using the queryDGIdb() function. The argument
+genes is a required argument, all other arguments are optional. These optional arguments
+are used as filters. If they are not provided, the query returns all results for a specific gene.
+
+```{r}
+result <- queryDGIdb(genes)
+```
+
+
+The results are available in the following four formats:
+
+-Result summary Drug-gene interactions summarized by the source(s) that reported them.
+
+-Detailed results Search terms matching exactly one gene that has one or more drug interactions.
+
+-By gene Drug interaction count and druggable categories associated with each gene.
+
+-Search term summary Summary of the attempt to map gene names supplied by the user
+to gene records in DGIdb.
+
+```{r}
+## Result summary
+resultSummary(result) %>% head()
+```
+
+```{r}
+## Detailed results
+detailedResults(result) %>% 
+  arrange(Gene) %>%
+  head(n=10)
+```
+
+```{r}
+## By gene
+byGene(result) %>% head()
+```
+
+```{r}
+## Search term summary
+searchTermSummary(result) %>% head()
+```
+
+
+#Filters 
+
+Druggable genome: https://www.ncbi.nlm.nih.gov/pubmed/28356508
+DGI: https://academic.oup.com/nar/article/46/D1/D1068/4634012
+
+```{r}
+resultFilter <- queryDGIdb(genes, 
+                           geneCategories = c("CLINICALLY ACTIONABLE"))
+
+```
+
+```{r}
+finalRes <- detailedResults(resultFilter)  
+
+dim(finalRes)
+tail(finalRes)
+```
+
+```{r}
+deDupRes <- detailedResults(resultFilter) %>% 
+  group_by(Gene) %>% 
+  mutate_at(vars(Drug:PMIDs), ~collapseRows(col = ., uniq = FALSE, sep="; ")) %>% 
+  ungroup()  %>%
+  unique()
+
+
+dim(finalRes)
+```
+
+```{r}
+head(finalRes)
+
+table(duplicated(finalRes$Gene))
+```
+

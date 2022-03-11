@@ -1,0 +1,197 @@
+---
+title: "20191216_identify_lys_arg_stalls"
+output: github_document
+---
+
+# Purpose
+ 
+- I will identify human genes encoding repeats of AAG lysine / AGA arginine.
+
+# Procedure
+
+## Load libraries
+```{r}
+library(plyranges)
+library(Biostrings)
+library(GenomicRanges)
+library(GenomicFeatures)
+library(BSgenome)
+library(broom)
+library(biobroom)
+library(glue)
+library(stringr)
+library(grid)
+library(tidyverse)
+```
+
+
+## Load hg38 genome and annotations
+```{r}
+genome <- BSgenome.Hsapiens.UCSC.hg38::BSgenome.Hsapiens.UCSC.hg38
+
+# Bring in annotations for the canonical coding sequences (originally generated in Darnell2018)
+ annotations <- glue("~/fh/fast/subramaniam_a/db/rasi/genomes/human/hg38/gencode/annotations/gencode.v24.canonical_ccds_transcripts.20170315.gff3.gz")
+ 
+annotations <- rtracklayer::import.gff3(annotations)
+```
+
+```{r}
+# genome
+# annotations 
+```
+
+## Subset annotations to contain only cannonical coding seuqences (CCDS)
+```{r}
+cds <- annotations %>% 
+  dplyr::filter(type == "CDS" & transcript_type == "protein_coding") %>%
+  # Select only transcripts with an annotated cannonical coding seuqence. 
+  dplyr::filter(!is.na(ccdsid)) %>% 
+  # Remove chrY, because it has duplicate sequences as in chrX, which confounds extracting transcript sequences
+  dplyr::filter(seqnames != 'chrY') %>% 
+  split(.$gene_name) %>% 
+  #  split(.$transcript_id) %>% 
+  print()
+```
+
+## Extract genomic sequence for annotated CDS regions
+```{r}
+# Extract sequence information from the genomic regions defined by our annotations
+seq <- extractTranscriptSeqs(genome, cds) %>% print
+```
+
+## Convert DNAStringSet to a dataframe for tidyverse manipluations
+```{r} 
+# convert nucleotide seuqence to a dataframe with nested sequence info
+df <- enframe(seq) 
+
+# Convert a nested DNAString info to a Tibble
+strings <- df$value %>%
+  as.character() %>%
+  as.tibble() %>%  
+  rowid_to_column()
+
+# Convert gene names to a seperate tibble for joining
+gene_names <- df$name %>%
+  as.character() %>%
+  as.tibble() %>%  
+  rowid_to_column()
+
+# Rejoin sequence and transcript ID by row
+seq_tbl <-left_join(gene_names, strings, by = 'rowid')  %>% 
+  rename(id = value.x) %>% 
+  rename(string = value.y) %>% print 
+```
+
+## Identify seuqences encoding runs of AAA/AAG lysine and AGA arginine
+```{r}
+# Test regExp for efficacy of extraction. Searching for 9 Lys/Arg repeats results in 30 hits. 
+motif_subset <- seq_tbl %>% 
+  dplyr::filter(str_detect(string,  "(AAA|AAG|AGA){9,}" )) %>%  print 
+
+# Make a list of all DNA sequneces 
+sequence <- seq_tbl$string 
+
+# Extract Lys/Arg sequence motifs
+motif <- enframe(str_extract_all(sequence, "(AAA|AAG|AGA){9,}")) 
+motif <- motif$value %>% 
+  as.character() %>%
+  as.tibble() %>%  
+  rowid_to_column() %>% 
+  rename(stall = value)
+
+# Replace all "character(0)" lines (eg. no stall) with NA
+motif[ motif == "character(0)" ] <- NA
+
+# Now extract coding seuqence position information
+location <- enframe(str_locate_all(sequence, "(AAA|AAG|AGA){9,}"))
+# Return the start of the repetitive stall sequence as a number 
+location <- location$value %>%
+  as.character() %>%
+  as.tibble() %>%  
+  rowid_to_column()
+
+# Return the start of sequence range (currently seperated by a comma) as a single number. 
+location$value <- sapply(strsplit(location$value,","), `[`, 1) 
+location$value <- extract_numeric(location$value)
+location <- location %>% rename(position = value)
+
+# Rejoin aa_tbl data by rowid, to add back the sequences and transcript IDs
+motif_ranges <- left_join(seq_tbl, location, by = 'rowid') 
+motif_ranges <- left_join(motif_ranges, motif, by = 'rowid')
+motif_ranges
+```
+
+# Convert stall coordiantes to a GRange 
+```{r}
+# Translate the nucleotide seuqence for each gene encoding a putative stall region
+gene_list <- motif_ranges %>%  
+    dplyr::filter(!is.na(stall)) %>% 
+    dplyr::select(-rowid) %>% 
+    # now add back rowid, such that rows are numbered 1-54, for joining
+    rowid_to_column() %>%  
+    print 
+    
+# Convert gene_list nucleotide sequence back to a DNAstring set
+gene_list_sequence <- DNAStringSet(gene_list$string)
+
+# Translate this DNAString set
+translated_gene_list <- translate(gene_list_sequence)
+
+# Now convert the translated strings back to a character list, and rejoin
+char_list <- enframe(translated_gene_list) 
+# Select the sequence column and convert to characters, with rowid
+char_list <- char_list$value %>% 
+     as.character() %>%
+     as.tibble() %>%  
+     rowid_to_column()  %>%  print
+
+# Rejoin translated sequence to list of stall encoding genes
+translated_gene_list <-left_join(gene_list, char_list, by = 'rowid') %>%
+  rename(aa_string = value) %>% print 
+
+# Search this set of translated for 9x repeats of K or R 
+# Test regExp for efficacy of extraction. Searching for 9 Lys/Arg repeats results in 54 hits. 
+in_frame_stalls <- translated_gene_list %>% 
+  dplyr::filter(str_detect(aa_string,  "(R|K){9,}" )) %>%  print 
+
+in_frame_stalls %>% write_tsv("../tables/in_frame_stall_sequences.tsv")
+```
+
+
+## Map these stall containing genes back to the genome
+```{r}
+# First convert the stall coordiates to a Grange
+tx_ranges <- in_frame_stalls %>% 
+   mutate(seqname = id) %>%
+   mutate(start = position) %>% 
+   mutate(end = start) %>% 
+   dplyr::select(-position, -string, -aa_string, -rowid, seqname, start, end, id, stall) %>% print %>% 
+   GRanges()
+
+# Now map transcript stall location to annotated coding sequence. 
+tx_coords <- mapFromTranscripts(tx_ranges, cds) %>%
+      mutate(transcript_id = seqnames(tx_ranges)[xHits]) 
+
+# check that the mapping was done correctly
+tx_coords %>% print %>% 
+  shift_upstream(3) %>% 
+  anchor_5p() %>% 
+  stretch(32) %>% 
+  getSeq(genome, .) %>%
+  translate()
+
+# Yep, motifs are identified! 
+```
+
+# Conclusions
+
+- Cool, so we output a list of genes encoding repetitive Arginine/Lysine residues that could potentially cause ribosome pausing. 
+
+- What's next?
+
+1. First thing to do would be a sanity check on these motifs. See if there's increases ribosome density at these potential stall location in ribosome profiling data.
+
+2. Then, take the ribosome profiling data and calculate translation efficiency (TE) for each of these transcripts; this can be used as a proxy for initiation rate.  
+
+3. Test the subset of genes that encode putative stalls + high initiation rate in functional assays. Potentially look for signatures of upregulation in RQC knockout / knockdown seuqencing datasets.
+ 

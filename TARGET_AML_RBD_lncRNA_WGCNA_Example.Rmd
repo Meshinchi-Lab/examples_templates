@@ -1,0 +1,788 @@
+---
+title: "WGCNA Analysis for lncRNAs and mRNAs"
+author: "Jenny Smith"
+date: "10/23/19"
+output: html_document
+---
+
+# Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2019.04.05_Kallisto_DE_Transcriptome_MS/"))
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(Cairo)
+library(gridExtra)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(DeGSEA)
+library(GOstats)
+getwd()
+```
+
+
+#Raw Counts
+
+```{r}
+AML.NBM.only <- TRUE
+```
+
+```{r}
+rbd.tpm <- readRDS(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_RBD_Kallisto_Quant_GeneLevel_TPM.RDS"))
+
+rownames(rbd.tpm) <- gsub("\\.[0-9]{1,2}$", "", rownames(rbd.tpm))
+# rbd.tpm <- rbd.tpm[,-grep("Kas|MV4|BM[0-9]|RO[0-9]|MPN[0-9]",
+#                   colnames(rbd.tpm))] 
+ 
+keep <- rowSums(rbd.tpm >= 1.0) >= 0.05*ncol(rbd.tpm)
+rbd.tpm <- rbd.tpm[keep,]
+rbd.tpm <- rbd.tpm[grep("^ENSG", rownames(rbd.tpm)),]
+log2.tpm <- log2(rbd.tpm+1)
+
+dim(log2.tpm) #25498 1394
+head(log2.tpm[,1:5])
+```
+
+
+#Gene Annotations 
+
+```{r}
+IDmap <- read.csv(file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_10.9.19.csv"))
+
+head(IDmap[,1:5])
+dim(IDmap) #59853    25
+```
+
+```{r}
+lncRNAs <- read.csv(file.path(HOME,"0000.00.02_Reference_GeneInfo/gencode.v29.lncRNAs_GeneLevel.IDmap.csv"))
+# table(lncRNAs$gene_type)
+dim(lncRNAs)
+```
+
+```{r}
+protien.coding <- IDmap %>% 
+  filter(grepl("protein_coding",gene_type))
+
+dim(protien.coding)
+```
+
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.4.19.csv"))
+
+merged <- merged %>%
+  filter(!is.na(USI)) %>%
+  add_row(USI=grep("^BM|^RO", colnames(rbd.tpm), value=TRUE)) %>%
+  mutate(Group=ifelse(grepl("^BM|^RO", USI),"NBM","AML")) %>%
+  mutate_at(vars(Protocol:M7_AML), ~ifelse(Group=="NBM", "NBM", .)) %>%
+  set_rownames(.$USI)
+
+dim(merged) #2179  138
+```
+
+```{r}
+table(merged$Group)
+# table(merged$M7_AML)
+# table(merged$Primary.Cytogenetic.Code)
+```
+
+```{r}
+final.mod <- readRDS("Survival/TARGET_AML_RBD_lncRNAs_UV_upreg_pvalue_LT0.1_8.2.19.RDS")
+```
+
+#WGCNA Tutorial
+
+```{r message=FALSE, warning=FALSE}
+library(WGCNA)
+```
+
+https://bioconductor.org/packages/devel/bioc/vignettes/CVE/inst/doc/WGCNA_from_TCGA_RNAseq.html
+
+https://support.bioconductor.org/p/65124/
+
+https://www.nature.com/articles/s41398-019-0448-z#Sec2
+Network construction and module detection were analyzed with the “BlockwiseModules” function in the WGCNA package. Briefly, the Pearson correlation matrix was calculated for all possible RNA pairs and then transformed into an adjacency matrix with soft thresholding power using the “picksoftThreshold” function. A dynamic tree cut algorithm was used to detect groups of highly correlated genes. The minimum module size was set according to the differentially expressed gene (DEG) from each group and the threshold for merging module was set to 0.25 as default. Each module, which was assigned a unique color, contained a unique set of genes.
+
+The two important parameters, including gene significance (GS) and intramodular connectivity (Ki) were used for identifying hub genes of behavior-associated modules. Intramodular hub genes were selected based on a strong correlation with depression (GSi > 0.9) and higher connectivity (Ki > 0.9). GSi represents the strength of a correlation between a gene and a phenotypic trait. Ki, which means intramodular connectivity, was calculated from the sum of its connection strengths with all the other genes in the same module.
+
+## Filter Genes
+
+```{r}
+DEGs.NBM <- read.csv("DEGs/AMLvsNBM_allGenes_DEGs.csv") %>% 
+  filter(gene %in% rownames(log2.tpm)) %>% 
+  mutate(gene_type_simple=case_when(
+    gene %in% lncRNAs$gene_id ~ "lncRNA",
+    gene %in% protien.coding$gene_id ~ "protein_coding",
+    TRUE ~ "other")) %>% 
+  left_join(., IDmap, by=c("gene"="gene_id"))
+
+  
+# DEGs.NBM <- read.csv("Survival/TraingSet_AMLvsNBM_DEGs.csv") #only lncRNAs... will need to re-run for all genes/lncRNAS
+
+dim(DEGs.NBM)
+head(DEGs.NBM)
+table(DEGs.NBM$gene_type)
+```
+
+```{r}
+sig.lncRNAs <- read.csv("Survival/TARGET_AML_RBD_lncRNAs_UV_upreg_pvalue_LT0.1_Coef_7.17.19.csv")
+
+dim(sig.lncRNAs)
+```
+
+```{r}
+genes.lncs <- intersect(rownames(log2.tpm), c(protien.coding$gene_id, lncRNAs$gene_id))
+length(genes.lncs) 
+```
+
+```{r}
+expnData <- log2.tpm[DEGs.NBM$gene,-grep("Kas|MV4|BM[0-9]|RO[0-9]|MPN[0-9]", colnames(log2.tpm))]
+mads <- apply(expnData,1,mad) %>% set_names(rownames(expnData))
+sel <- mads[order(mads, decreasing = T)]
+head(sel)
+```
+
+```{r}
+# intersect(sig.lncRNAs$gene,genes.lncs) #OK
+# intersect(sig.lncRNAs$gene,names(sel)) #not in the top 10000 most varied.
+# intersect(sig.lncRNAs$gene,DEGs.NBM$gene) #35 only in the whole cohort
+```
+
+```{r}
+wgcna.mat <- t(expnData[names(sel),])
+dim(wgcna.mat)
+```
+
+```{r}
+gsg <- goodSamplesGenes(wgcna.mat, verbose = 3)
+gsg$allOK
+```
+
+
+## Select Power for Thresholding
+
+```{r}
+WGCNAnThreads()
+allowWGCNAThreads(nThreads = NULL)
+WGCNAnThreads()
+enableWGCNAThreads(nThreads = WGCNAnThreads())
+```
+
+corFnc = cor,
+corOptions = list(use='p',method='pearson'), #spearman is much much longer
+ 
+```{r}
+powers <-  c(c(1:10), seq(from = 12, to=20, by=2)) 
+
+# enableWGCNAThreads for parallelization
+sft = pickSoftThreshold(wgcna.mat, 
+                        powerVector = powers,
+                        networkType = "signed hybrid", #author suggests this method
+                        RsquaredCut = 0.85, #cut-off suggested by Horvath
+                        corFnc = bicor,
+                        corOptions = list(maxPOutliers =0.1), 
+                        verbose = 5)
+
+# str(sft)
+```
+
+```{r fig.height=5, fig.width=5}
+plot(sft$fitIndices[,1],
+     -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab='Soft Threshold (power)',
+     ylab='Scale Free Topology Model Fit,signed R^2',
+     type='n', 
+     main = paste('Scale independence'))
+text(sft$fitIndices[,1],
+     -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=1,col='red')
+abline(h=0.90,col='red') 
+```
+
+##Based on Block-wise
+
+```{r eval=FALSE}
+beta <- sft$powerEstimate
+bwnet <- blockwiseModules(wgcna.mat, 
+                          maxBlockSize = 5000,
+                  power = beta, 
+                  blocks=NULL,
+                  
+                  TOMType = "unsigned", #check on this!!
+                  networkType="signed hybrid",
+                  
+                  corType="bicor",
+                  maxPOutliers = 0.1,
+                  pearsonFallback = "individual",
+                  
+                  deepSplit=4,
+                  minModuleSize = 30,
+                  reassignThreshold = 0,
+                  
+                  pamStage = TRUE, 
+                  pamRespectsDendro = TRUE,
+                  
+                  mergeCutHeight = 0.25,
+                  numericLabels = TRUE,
+                  
+                  saveTOMs = TRUE,
+                  saveTOMFileBase = "AML_NBM_blockwise_test",
+                  nThreads=4,
+                  verbose = 3)
+
+#nPreclusteringCenters
+
+```
+
+```{r}
+blockLabels <- bwnet$colors
+blockColors <- labels2colors(blockLabels)
+table(blockColors)
+```
+
+```{r fig.width=14, fig.height=6}
+plotDendroAndColors(bwnet$dendrograms[[1]], 
+                    blockColors[bwnet$blockGenes[[1]]],
+                    "Module colors", 
+                    main = "Gene dendrogram and module colors in block 1", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+
+plotDendroAndColors(bwnet$dendrograms[[2]], 
+                    blockColors[bwnet$blockGenes[[2]]],
+                    "Module colors", 
+                    main = "Gene dendrogram and module colors in block 1", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+```
+
+
+##Based on Set-by-Step
+
+```{r}
+#Adjacenty matrix
+beta <- sft$powerEstimate
+
+adjacency.mat <- adjacency(wgcna.mat,
+                           power=beta,
+                           type="signed hybrid",
+                           corFnc=bicor, 
+                           corOptions = list(maxPOutliers = 0.1),
+                           distFnc = dist)
+str(adjacency.mat)
+```
+
+```{r}
+#dissimilary matrix with TOM (topological overlap) to avoid noise and spurious associations
+TOM <- TOMsimilarity(adjMat=adjacency.mat,
+                     TOMType = "unsigned",
+                     verbose=3)
+dissim_tom <- 1-TOM
+
+str(dissim_tom)
+dim(dissim_tom)
+```
+
+
+
+## Based on biCor Matrix alone
+
+```{r eval=FALSE}
+#Calculate biweight midcorrelation efficiently for matrices.
+#maxPOutliers = 0.1 suggested by author p. horvath
+coexp.similarity <- abs(bicor(wgcna.mat, maxPOutliers = 0.1, nThreads=2))
+
+dim(coexp.similarity) #5000 by 5000
+beta <- sft$powerEstimate
+adjacency.mat <- coexp.similarity^beta
+
+#dissim_w below is the standard dissimilarity measure (w)
+dissim_w <- 1-adjacency.mat
+```
+
+
+
+## Dendrograms
+
+```{r}
+# To identify co-expression modules, genes are next clustered based on the dissimilarity measure, where branches of the dendrogram correspond to modules. 
+
+#create gene tree by average linkage hierarchical clustering 
+geneTree = hclust(as.dist(dissim_tom), method = 'ward.D2')
+```
+
+```{r fig.width=16, fig.height=6}
+plot(geneTree, xlab="", sub="", 
+     main = "Gene clustering on TOM-based dissimilarity", 
+     labels = FALSE, hang = 0.04, lwd=0.5)
+```
+
+```{r}
+#module identification using dynamic tree cut algorithm
+minModuleSize <- 30
+dynamicModules <- cutreeDynamic(dendro = geneTree, 
+                        distM = dissim_tom, 
+                        method = "hybrid",
+                        deepSplit = 4,
+                        pamStage=TRUE,
+                        pamRespectsDendro = FALSE,
+                        respectSmallClusters = TRUE,
+                        minClusterSize = minModuleSize)
+
+
+# str(dynamicModules)
+table(dynamicModules)
+```
+
+```{r fig.height=4}
+#assign module colours
+dynamicColors = labels2colors(dynamicModules)
+# table(module.colours)
+#plot the dendrogram and corresponding colour bars underneath
+plotDendroAndColors(geneTree, 
+                    dynamicColors,
+                    'Dynamic Module colours',
+                    dendroLabels = FALSE, 
+                    hang = 0.04,
+                    addGuide = TRUE, 
+                    guideHang = 0.05, main='AML vs NBM WGCNA')
+
+
+# table(dynamicModules,module.colours)
+```
+
+```{r fig.height=5, fig.width=5}
+library(ape)
+#calculate eigengenes
+MEgenes <- moduleEigengenes(wgcna.mat, 
+                       colors = dynamicColors,
+                       softPower = 6, #default to keep, unless obvious bad results
+                       excludeGrey = FALSE)
+MEs <- MEgenes$eigengenes
+
+#calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs)
+
+#cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = 'ward.D2')
+MEDissThres = 0.25
+
+MESampleTree <- hclust()
+```
+
+```{r fig.height=5}
+plot(METree, 
+     main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+abline(h=MEDissThres, col = "red")
+```
+
+
+
+## Merge Modules 
+
+```{r}
+#Merging functions
+merge <- mergeCloseModules(wgcna.mat,
+                           dynamicColors, 
+                           cutHeight = MEDissThres,
+                           verbose = 3)
+
+mergedColors <- merge$colors
+mergedMEs <- merge$newMEs
+```
+
+```{r fig.height=5}
+plotDendroAndColors(geneTree, 
+                    cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+# abline(h=MEDissThres)
+```
+
+```{r}
+# Rename to moduleColors
+moduleColors <- mergedColors
+
+# Construct numerical labels corresponding to the colors
+colorOrder <- c("grey", standardColors(100))
+moduleLabels <- match(moduleColors, colorOrder)-1
+MEs <- mergedMEs
+moduleColors <-  set_names(moduleColors, moduleLabels)
+
+
+table(moduleLabels, useNA='ifany') #collapsed to 20 modules from 56
+```
+
+```{r}
+samples <- intersect(rownames(wgcna.mat), rownames(merged))
+df <- merged[samples,] %>% 
+  dplyr::select(USI,Cytogenetic.Category.1, 
+                Cytogenetic.Category.2, SNVs,
+                Rare.Fusions, Age.Category)
+
+cc.1 <- colorCodes_aheatmap(df=dplyr::select(df, -USI))
+
+#cluster module eigengenes
+geneMETree = hclust(as.dist(1-cor(mergedMEs)), 
+                    method = 'ward.D2')
+
+#cluster module samples  on eigengenes
+sampMETree = hclust(as.dist(1-cor(t(mergedMEs[samples,]))), 
+                    method = 'ward.D2')
+```
+
+```{r fig.height=5}
+plot(geneMETree, 
+     main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+```
+
+```{r fig.height=5, fig.width=14}
+cc <- cc.1[["Cytogenetic.Category.1"]]
+p <- df[["Cytogenetic.Category.1"]] %>%
+  set_names(df$USI)
+
+# cc <- cc.1[["Rare.Fusions"]] 
+# p <- df[["Rare.Fusions"]] %>% 
+#   set_names(df$USI)
+
+sample.dend <- colorDends(hclustObject = sampMETree,
+                          colorCodes = cc, 
+                          group = p, 
+                          textsize = c(0.2,1.5))
+barplot(rep(1,length(cc)), col=cc,names.arg = names(cc))
+```
+
+```{r}
+mod.genes = vector('list',length(unique(moduleColors)))
+names(mod.genes) <- unique(moduleColors)
+
+for(i in unique(moduleLabels)){
+  col <- unique(moduleColors[names(moduleColors) == i])
+  mod.genes[[col]] <- colnames(wgcna.mat)[moduleLabels==i]
+}
+
+# mod.genes
+
+mods.with.lncSig <- lapply(mod.genes, function(x) intersect(x,sig.lncRNAs$gene))
+idx <- sapply(mods.with.lncSig, length)>0
+mods.with.lncSig <- mods.with.lncSig[idx]
+```
+
+
+##Compare Blockwise to Step-by-Step
+
+```{r}
+bwLabels <- match(bwnet$colors,moduleLabels)
+bwModuleColors <- labels2colors(bwLabels)
+```
+
+```{r}
+plotDendroAndColors(geneTree,
+                    cbind(moduleColors, bwModuleColors),
+                    c("Single block", "2 blocks"),
+                    main = "Single block gene dendrogram and module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+
+
+#Module-Trait Enrichements
+
+
+```{r}
+samples <- intersect(rownames(wgcna.mat), rownames(merged))
+wgcna.mat2 <- wgcna.mat[samples,]
+
+
+# Define numbers of genes and samples
+nGenes = ncol(wgcna.mat2)
+nSamples = nrow(wgcna.mat2)
+
+#Clean up traits
+datTraits <- merged[samples,] %>% 
+  dplyr::select(USI,Cytogenetic.Category.1, 
+                Cytogenetic.Category.2, SNVs,
+                Rare.Fusions, Age.Category) %>% 
+  mutate(Age.Category=gsub(" ",".",Age.Category)) %>%
+  #binarize all the traits of interest
+  bind_cols(.,
+            createMultiCols(col = .$Cytogenetic.Category.1, suffix = "_cyto"),
+            createMultiCols(col = .$Cytogenetic.Category.2, suffix = ""),
+            createMultiCols(col = .$SNVs, suffix = ""),
+            createMultiCols(col = .$Rare.Fusions, suffix = ""),
+            createMultiCols(col = .$Age.Category, suffix = "")) %>% 
+  dplyr::select(-c(Cytogenetic.Category.1:Age.Category),
+                -matches("OtherAML|Unknown")) %>% 
+  mutate_at(vars(-USI),~factor(., levels=c("No","Yes"),
+                     labels = c(0,1))) %>%
+  column_to_rownames("USI") 
+
+            
+
+dim(wgcna.mat2)
+dim(datTraits)
+# head(datTraits)
+```
+
+```{r}
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(wgcna.mat2, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+dim(MEs) #1394   20
+moduleTraitCor = cor(MEs, datTraits, use = "p")
+```
+
+```{r}
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+moduleTraitFDR <- apply(moduleTraitPvalue,2, p.adjust, method="BH")
+
+moduleTraitFDR <- moduleTraitFDR %>% 
+  as.data.frame() %>%
+  mutate_all(~ifelse(. > 0.05, NA, signif(.,1))) %>% 
+  as.matrix()
+
+
+head(moduleTraitFDR)
+```
+
+```{r fig.width=14}
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), 
+                   "\n(",moduleTraitFDR, ")", 
+                   sep = "")
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+png("WGCNA_Trait_Module_Associations.png", height = 10, width = 14, res=150, units="in")
+# Display the correlation values within a heatmap plot
+par(mar = c(11, 10, 5, 5))
+labeledHeatmap(Matrix = moduleTraitCor,
+        xLabels = names(datTraits),
+        yLabels = names(MEs),
+        ySymbols = names(MEs),
+        colorLabels = FALSE,
+        colors = blueWhiteRed(299),
+        textMatrix = textMatrix,
+        setStdMargins = FALSE,
+        cex.text = 0.6,
+        zlim = c(-0.6,0.6),
+        main = paste("Module-trait relationships"))
+dev.off()
+```
+
+
+#Gene/Trait Enrichements
+
+```{r}
+#calculate gene significance measure for CBFGLIS
+cbfglis <- ifelse(dat$CBFA2T3.GLIS2 == "Yes",1,0)
+
+GS_score <- t(sapply(1:ncol(wgcna.mat2),
+                function(x)c(t.test(wgcna.mat2[,x]~cbfglis,var.equal=F)$p.value,
+                             t.test(wgcna.mat2[,x]~cbfglis,var.equal=F)$estimate[1],
+                             t.test(wgcna.mat2[,x]~cbfglis,var.equal=F)$estimate[2])))
+```
+
+```{r}
+GS_score <-cbind(GS_score, abs(GS_score[,2] - GS_score[,3]))
+colnames(GS_score) <- c('p_value','mean_high_lscore',
+                         'mean_low_lscore',
+                        'effect_size(high-low score)')
+rownames(GS_score) <- colnames(wgcna.mat2)
+
+
+head(GS_score)
+dim(GS_score)
+```
+
+
+##GO Ontologies
+
+```{r message=FALSE, warning=FALSE}
+#reference genes = all 5000 top mad genes 
+ref_genes = colnames(wgcna.mat2)
+
+#create data frame for GO analysis
+library(org.Hs.eg.db)
+GO <- toTable(org.Hs.egGO)
+ENSG <- toTable(org.Hs.egENSEMBL)
+GO_data_frame <- data.frame(go_id=GO$go_id, 
+                            Evidence=GO$Evidence,
+                            ensembl_id=ENSG$ensembl_id[match(GO$gene_id,
+                                            ENSG$gene_id)])
+NA.IDs <- sapply(GO_data_frame$ensembl_id, is.na)
+toKeep <- which(table(GO_data_frame$go_id) >= 20) #at least 20 genes in a GO category
+GO_data_frame <- GO_data_frame[!NA.IDs,] #No NAs from gene ID conversion
+GO_data_frame <- GO_data_frame[GO_data_frame$go_id %in% names(toKeep),]
+
+#create GOAllFrame object
+library(AnnotationDbi)
+GO_ALLFrame = GOAllFrame(GOFrame(GO_data_frame, 
+                                 organism = 'Homo sapiens'))
+
+#create gene set
+library(GSEABase)
+gsc <- GeneSetCollection(GO_ALLFrame, setType = GOCollection())
+
+# str(GO_ALLFrame)
+gsc
+```
+
+```{r message=FALSE}
+#perform GO enrichment analysis and save results to list - this make take several minutes-
+GSEAGO <- lapply(mod.genes,function(x){
+  GSEAGO[[i]] = summary(hyperGTest(GSEAGOHyperGParams(name = 'Homo sapiens GO',
+              geneSetCollection = gsc,
+              geneIds =  x, 
+              universeGeneIds = ref_genes, 
+              ontology = 'BP', 
+              pvalueCutoff = 1,
+              conditional = TRUE, 
+              testDirection = 'over'))) %>%
+    filter(Size > 15 & Size < 500) %>%
+    mutate(FDR=p.adjust(Pvalue, method = "BH")) %>% 
+    filter(Pvalue<=0.1)
+})
+
+# lapply(names(GSEAGO), 
+#        function(x)write.csv(GSEAGO[x],paste0("AMLvsNBM_WGCNA_",x,"GSEA_GO.csv") , row.names = FALSE))
+
+```
+
+
+##KEGG Paths
+
+```{r}
+library(pathfindR)
+```
+
+```{r}
+KEGG.mods <- lapply(names(mod.genes),function(x){
+  module <- DEGs.NBM %>% 
+    filter(gene %in% mod.genes[[x]]) %>% 
+    dplyr::select(gene_name.x, logFC, adj.P.Val);
+  
+  enr <- run_pathfindR(module,
+                        p_val_threshold = 0.05,
+                        visualize_pathways = TRUE,
+                        human_genes=TRUE,
+                        adj_method = "bonferroni",
+                        sig_gene_thr=5,
+                        gene_sets="KEGG",
+                        bubble=TRUE,
+                        output_dir=paste0("WGCNA/",x),
+                        silent_option=TRUE);
+  return(enr)
+})
+```
+
+```{r}
+m1 <- DEGs.NBM %>% 
+  filter(gene %in% mod.genes$palevioletred3) %>% 
+  dplyr::select(gene_name.x, logFC, adj.P.Val)
+
+dim(m1)
+View(m1)
+```
+
+```{r}
+#custom_genes is a simple list like used iwth GAGE.
+RA_out <- run_pathfindR(m1,
+                        p_val_threshold = 0.05,
+                        visualize_pathways = TRUE,
+                        human_genes=TRUE,
+                        adj_method = "bonferroni",
+                        sig_gene_thr=5,
+                        gene_sets="KEGG",
+                        bubble=TRUE,
+                        output_dir="WGCNA_KEGG")
+
+str(RA_out)
+```
+
+```{r}
+pin_path <- return_pin_path(pin_name_path = "KEGG")
+```
+
+```{r}
+RA_processed <- input_processing(input = RA_input, 
+                                 p_val_threshold = 0.05, ## p value threshold to filter DEGs
+                                 pin_path = pin_path, 
+                                 human_genes = FALSE) 
+```
+
+```{r}
+n_iter <- 15 ## number of iterations
+combined_res <- NULL ## to store each iteration's result
+for (i in 1:n_iter) {
+  ###### Active Subnetwork Search
+  ## Name of output file
+  snws_file <- paste0("active_snws_", i, ".txt")
+  active_snws <- active_snw_search(RA_processed, pin_path, snws_file = snws_file, search_method = "GR")
+
+  ###### Enrichment analyses
+  enrichment_res <- enrichment_analyses(active_snws, gene_sets = "GO-All",
+                                        pin_path = pin_path,
+                                        input_genes = RA_processed$GENE,
+                                        list_active_snw_genes = TRUE)
+  ## combine all results via rbind
+  combined_res <- rbind(combined_res, enrichment_res)
+}
+```
+
+
+```{r}
+##### Summarize Combined Enrichment Results
+final_res <- summarize_enrichment_results(combined_res, list_active_snw_genes = TRUE)
+
+##### Annotate DEGs Involved in Each Pathway
+final_res <- annotate_pathway_DEGs(final_res, input_processed = RA_processed, gene_sets = "GO-All")
+```
+
+
+
+#Module Significance
+
+```{r}
+##calculate module significance
+MS.score = as.data.frame(cbind(GS_score,modules))
+MS.score$log_p_value = -log10(as.numeric(MS.score$p_value))
+
+MS.score = ddply(MS.score, .(modules), summarize, mean(log_p_value), sd(log_p_value))
+colnames(MS.score) = c('modules','pval','sd')
+
+MS.score.bar = as.numeric(MS.score[,2])
+MS.score.bar[MS.score.bar<(-log10(0.05))] = 0
+names(MS.score.bar) = GO.module.name
+
+METree.GO = METree
+label.order = match(METree$labels,paste0('ME',labels2colors(0:(length(unique(modules))-1))))
+METree.GO$labels = GO.module.name[label.order]
+plotTree.wBars(as.phylo(METree.GO), MS.score.bar, tip.labels = TRUE, scale = 0.2)
+```
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

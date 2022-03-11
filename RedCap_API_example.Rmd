@@ -1,0 +1,65 @@
+---
+title: "Testing the RedCap API"
+author: "Jenny Smith"
+date: "6/17/21"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(CDE,"RedCap"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+
+getwd()
+```
+
+
+#Set-up 
+
+```{r}
+library(REDCapR) # Load the package into the current R session.
+uri   <- "https://bbmc.ouhsc.edu/redcap/api/"
+# redcap_url <- "https://cdsdevsql04.fhcrc.org/redcap/"
+token <- Sys.getenv("REDCAP_TOKEN")
+```
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
